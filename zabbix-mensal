@@ -1,1 +1,77 @@
+import requests
+import statistics
+import time
+from datetime import datetime, timedelta
 
+# Configurações
+ZABBIX_URL = "https://zabbix.toledofibra.net.br/api_jsonrpc.php"
+AUTH_TOKEN = "827be10800577e595a26a0cad5ccac7976d8b459f27adf593182fceb18a2ee69"
+HOSTNAME = "router-edge-for"
+ITEM_KEY_SEARCH = 'net.if.in[ifHCInOctets.10]'  # procura no key_ para ser mais flexível
+COLETA_SEGUNDOS = 60  # intervalo de coleta esperado
+
+# Calcula últimos 7 dias
+time_till = int(time.time())  # agora
+time_from = int((datetime.now() - timedelta(days=7)).timestamp())
+
+def zabbix_api(method, params):
+    payload = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+        "auth": AUTH_TOKEN,
+        "id": 1
+    }
+    r = requests.post(ZABBIX_URL, json=payload, verify=False)
+    r.raise_for_status()
+    return r.json()["result"]
+
+# 1️⃣ Descobrir itemid
+items = zabbix_api("item.get", {
+    "output": ["itemid", "name", "key_"],
+    "host": HOSTNAME,
+    "search": {"key_": ITEM_KEY_SEARCH}
+})
+
+if not items:
+    print(f"Item com '{ITEM_KEY_SEARCH}' não encontrado no host {HOSTNAME}!")
+    exit()
+
+# Pega o primeiro que casar
+itemid = items[0]["itemid"]
+item_name = items[0]["name"]
+item_key = items[0]["key_"]
+
+print(f"Item encontrado: {item_name} ({item_key})")
+
+# 2️⃣ Buscar histórico (history=3 → unsigned integer)
+history = zabbix_api("history.get", {
+    "history": 3,
+    "itemids": itemid,
+    "time_from": time_from,
+    "time_till": time_till,
+    "output": "extend",
+    "sortfield": "clock",
+    "sortorder": "ASC"
+})
+
+if not history:
+    print("Nenhum dado encontrado no período!")
+    exit()
+
+# 3️⃣ Processar valores
+values = [int(h["value"]) for h in history]
+
+min_val = min(values)
+max_val = max(values)
+avg_val = statistics.mean(values)
+sum_bits = sum(values) * COLETA_SEGUNDOS  # total em bits
+sum_mb = sum_bits / 8 / 1024 / 1024
+
+# 4️⃣ Exibir resultados
+print(f"\nHost: {HOSTNAME}")
+print(f"Período: {datetime.fromtimestamp(time_from)} até {datetime.fromtimestamp(time_till)}")
+print(f"Mínimo: {min_val} bits/s")
+print(f"Média: {avg_val:.2f} bits/s")
+print(f"Máximo: {max_val} bits/s")
+print(f"Total: {sum_mb:.2f} MB nos últimos 7 dias")
