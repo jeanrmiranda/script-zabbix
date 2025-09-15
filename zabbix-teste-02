@@ -6,34 +6,33 @@ from datetime import datetime, timedelta, timezone
 from calendar import monthrange
 
 # =======================
-# CONFIGURAÇÕES
+# CONFIG
 # =======================
 ZABBIX_URL = "https://zabbix.toledofibra.net.br/api_jsonrpc.php"
-# Pegue do ambiente se existir; caso contrário usa o literal abaixo
 AUTH_TOKEN = os.getenv("ZABBIX_TOKEN", "827be10800577e595a26a0cad5ccac7976d8b459f27adf593182fceb18a2ee69")
 HOSTNAME = "router-edge-for"
 
-# 3 interfaces (troque os ifIndex conforme necessário)
 ITEM_KEYS = [
     "net.if.in[ifHCInOctets.10]",
     "net.if.in[ifHCInOctets.11]",
     "net.if.in[ifHCInOctets.12]",
 ]
 
-# Se True: usa últimos 30 dias; se False: usa o mês anterior fechado
+# Se True: usa últimos 30 dias; se False: mês anterior fechado
 ULTIMOS_30_DIAS = False
 
-# Verificação de certificado TLS. Se seu Zabbix tiver cert válido, deixe True.
+# SSL do requests
 VERIFY_SSL = False
-
-# Timeout em segundos para requests
 HTTP_TIMEOUT = 60
 
+# Impressões opcionais
+PRINT_TOTAL = False          # mostra total (bytes) — desativado para não confundir
+PRINT_P95 = True             # mostra 95º percentil (bits/s)
+
 # =======================
-# UTILITÁRIOS DE TEMPO
+# Tempo
 # =======================
 def intervalo_mes_anterior_utc(now_utc: datetime):
-    """Retorna (time_from, time_till) do mês anterior completo em UTC (epoch int)."""
     ano = now_utc.year if now_utc.month > 1 else now_utc.year - 1
     mes = now_utc.month - 1 if now_utc.month > 1 else 12
     inicio = datetime(ano, mes, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -41,11 +40,10 @@ def intervalo_mes_anterior_utc(now_utc: datetime):
     return int(inicio.timestamp()), int(fim.timestamp())
 
 def intervalo_ultimos_30_dias_utc(now_utc: datetime):
-    """Retorna (time_from, time_till) dos últimos 30 dias em UTC (epoch int)."""
     return int((now_utc - timedelta(days=30)).timestamp()), int(now_utc.timestamp())
 
 # =======================
-# CHAMADA DE API ZABBIX
+# API
 # =======================
 def zabbix_api(method, params):
     payload = {"jsonrpc": "2.0", "method": method, "params": params, "auth": AUTH_TOKEN, "id": 1}
@@ -57,21 +55,39 @@ def zabbix_api(method, params):
     return j["result"]
 
 # =======================
-# FORMATOS/UNIDADES
+# Helpers
 # =======================
+def format_bps(bps: float) -> str:
+    # escalas decimais para redes (K/M/G/T bps)
+    units = ["bps", "Kbps", "Mbps", "Gbps", "Tbps"]
+    v = float(bps)
+    i = 0
+    while v >= 1000 and i < len(units) - 1:
+        v /= 1000.0
+        i += 1
+    return f"{v:.2f} {units[i]}"
+
 def format_total_bytes(num_bytes: float) -> str:
-    """Formata bytes em GB/TB com 2 casas, priorizando TB quando >= 1024 GB."""
     gb = num_bytes / (1024 ** 3)
     if gb >= 1024:
-        tb = gb / 1024
-        return f"{tb:.2f} TB"
+        return f"{gb/1024:.2f} TB"
     return f"{gb:.2f} GB"
 
+def percentile(values, p):
+    if not values:
+        return None
+    vals = sorted(values)
+    k = (len(vals) - 1) * (p / 100.0)
+    f = int(k)
+    c = min(f + 1, len(vals) - 1)
+    if f == c:
+        return vals[f]
+    return vals[f] + (vals[c] - vals[f]) * (k - f)
+
 # =======================
-# MAIN
+# Main
 # =======================
 def main():
-    # Silenciar aviso de SSL se VERIFY_SSL=False
     if not VERIFY_SSL:
         try:
             import urllib3
@@ -87,28 +103,24 @@ def main():
 
     print(f"Período: {datetime.utcfromtimestamp(time_from)} UTC até {datetime.utcfromtimestamp(time_till)} UTC\n")
 
-    # 1) Resolver itemids pelas chaves no host
+    # Resolver itemids
     items = zabbix_api("item.get", {
-        "output": ["itemid", "name", "key_", "value_type", "units"],
+        "output": ["itemid", "name", "key_", "units"],
         "host": HOSTNAME,
-        "filter": {"key_": ITEM_KEYS},  # filtro exato
+        "filter": {"key_": ITEM_KEYS},
     })
 
-    # Garantir que achou todas as chaves
     found = {it["key_"]: it for it in items}
     missing = [k for k in ITEM_KEYS if k not in found]
     if missing:
         print("Itens não encontrados no host:", missing)
         raise SystemExit(1)
 
-    # 2) Para cada item, buscar trends e calcular estatísticas/total
     for key in ITEM_KEYS:
         it = found[key]
         itemid = it["itemid"]
         nome = it.get("name", key)
-        units = it.get("units", "")  # esperado "" para items de tráfego, mas mantemos se vier
 
-        # trend.get retorna buckets (normalmente 1/hora) com value_avg/min/max
         trends = zabbix_api("trend.get", {
             "output": ["clock", "num", "value_avg", "value_min", "value_max"],
             "itemids": itemid,
@@ -122,33 +134,36 @@ def main():
             print(f"[{key}] {nome}: sem dados no período.\n")
             continue
 
-        # Remover horas sem amostras (num = 0)
-        buckets = [t for t in trends if int(t.get("num", 1)) > 0]
+        # Considera apenas horas com amostras
+        buckets = [t for t in trends if int(t.get("num", 0)) > 0]
         if not buckets:
             print(f"[{key}] {nome}: sem amostras válidas no período.\n")
             continue
 
-        # Médias por hora
-        avgs = [float(t["value_avg"]) for t in buckets]
+        # Arrays de estatísticas
+        avgs = [float(t["value_avg"]) for t in buckets]  # bits/s (média de cada hora)
         mins = [float(t["value_min"]) for t in buckets]
         maxs = [float(t["value_max"]) for t in buckets]
 
-        media = statistics.mean(avgs)
+        # Média do período (bits/s) = total_bits / tempo_medido
+        total_bits = sum(a * 3600 for a in avgs)           # soma de (média_hora * 3600s)
+        horas_medidas = len(buckets)                       # número de horas com dados
+        media_periodo_bps = total_bits / (horas_medidas * 3600.0)  # == statistics.mean(avgs)
+
+        # Estatísticas adicionais
         minimo = min(mins)
         maximo = max(maxs)
+        p95 = percentile(avgs, 95.0) if PRINT_P95 else None
 
-        # >>> TOTAL CORRETO DO PERÍODO
-        # Para itens net.if.in/out com HC*Octets, o Zabbix armazena trend em *bits/s*.
-        total_bits = sum(float(t["value_avg"]) * 3600 for t in buckets)  # 1 hora = 3600s
-        total_bytes = total_bits / 8.0
-
-        # Impressão
-        # Observação de unidade dinâmica:
-        unidade_velocidade = "bits/s" if not units else units
         print(f"[{key}] {nome}")
-        print(f"  Média:  {media:.2f} {unidade_velocidade}")
-        print(f"  Mínimo: {minimo:.2f} | Máximo: {maximo:.2f}")
-        print(f"  Total (aprox.): {format_total_bytes(total_bytes)}\n")
+        print(f"  Média no período: {format_bps(media_periodo_bps)}")
+        print(f"  Mínimo horário:   {format_bps(minimo)} | Máximo horário: {format_bps(maximo)}")
+        if p95 is not None:
+            print(f"  95º percentil:    {format_bps(p95)}")
+        if PRINT_TOTAL:
+            total_bytes = total_bits / 8.0
+            print(f"  Total (opcional): {format_total_bytes(total_bytes)}")
+        print()
 
 if __name__ == "__main__":
     try:
