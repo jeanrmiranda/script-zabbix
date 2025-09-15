@@ -6,7 +6,7 @@ from calendar import monthrange
 
 # === Config ===
 ZABBIX_URL = "https://zabbix.toledofibra.net.br/api_jsonrpc.php"
-AUTH_TOKEN = "827be10800577e595a26a0cad5ccac7976d8b459f27adf593182fceb18a2ee69"  # ⚠️ troque seu token (evite deixar em claro no repo)
+AUTH_TOKEN = "SEU_TOKEN_AQUI"  # ⚠️ troque seu token (evite deixar em claro no repo)
 HOSTNAME = "router-edge-for"
 
 # 3 interfaces (exemplos). Troque os ifIndex conforme necessário.
