@@ -1,0 +1,97 @@
+import requests
+import statistics
+import time
+from datetime import datetime, timedelta, timezone
+from calendar import monthrange
+
+# === Config ===
+ZABBIX_URL = "https://zabbix.toledofibra.net.br/api_jsonrpc.php"
+AUTH_TOKEN = "827be10800577e595a26a0cad5ccac7976d8b459f27adf593182fceb18a2ee69"  # ⚠️ troque seu token (evite deixar em claro no repo)
+HOSTNAME = "router-edge-for"
+
+# 3 interfaces (exemplos). Troque os ifIndex conforme necessário.
+ITEM_KEYS = [
+    'net.if.in[ifHCInOctets.10]',
+    'net.if.in[ifHCInOctets.11]',
+    'net.if.in[ifHCInOctets.12]',
+]
+
+# Se preferir “últimos 30 dias” em vez de “mês anterior completo”, mude para True
+ULTIMOS_30_DIAS = False
+
+# === Tempo (mês anterior completo) ===
+now = datetime.now(timezone.utc)
+if ULTIMOS_30_DIAS:
+    time_till = int(now.timestamp())
+    time_from = int((now - timedelta(days=30)).timestamp())
+else:
+    # mês anterior
+    ano = (now.year if now.month > 1 else now.year - 1)
+    mes = (now.month - 1 if now.month > 1 else 12)
+    inicio = datetime(ano, mes, 1, 0, 0, 0, tzinfo=timezone.utc)
+    fim = datetime(ano, mes, monthrange(ano, mes)[1], 23, 59, 59, tzinfo=timezone.utc)
+    time_from = int(inicio.timestamp())
+    time_till = int(fim.timestamp())
+
+def zabbix_api(method, params):
+    payload = {"jsonrpc": "2.0", "method": method, "params": params, "auth": AUTH_TOKEN, "id": 1}
+    r = requests.post(ZABBIX_URL, json=payload, verify=False, timeout=60)
+    r.raise_for_status()
+    j = r.json()
+    if "error" in j:
+        raise RuntimeError(j["error"])
+    return j["result"]
+
+# 1) Descobrir itemids pelas chaves
+items = zabbix_api("item.get", {
+    "output": ["itemid","name","key_","value_type"],
+    "host": HOSTNAME,
+    "filter": {"key_": ITEM_KEYS}  # filtro exato das 3 chaves
+})
+
+# Garantir que achou todas
+found_keys = {it["key_"]: it for it in items}
+missing = [k for k in ITEM_KEYS if k not in found_keys]
+if missing:
+    print("Itens não encontrados no host:", missing)
+    exit(1)
+
+print(f"Período: {datetime.utcfromtimestamp(time_from)} UTC até {datetime.utcfromtimestamp(time_till)} UTC\n")
+
+# 2) Para cada item, buscar trends e calcular média/total
+for key in ITEM_KEYS:
+    it = found_keys[key]
+    itemid = it["itemid"]
+    nome = it["name"]
+    # trend.get retorna buckets (tipicamente 1/hora) com value_avg
+    trends = zabbix_api("trend.get", {
+        "output": ["clock","num","value_avg","value_min","value_max"],
+        "itemids": itemid,
+        "time_from": time_from,
+        "time_till": time_till,
+        "sortfield": "clock",
+        "sortorder": "ASC"
+    })
+
+    if not trends:
+        print(f"[{key}] {nome}: sem dados no período.")
+        continue
+
+    # médias por hora
+    avgs = [float(t["value_avg"]) for t in trends]
+
+    # Média global do período = média das médias horárias (horas têm peso igual)
+    media = statistics.mean(avgs)
+    minimo = min(float(t["value_min"]) for t in trends)
+    maximo = max(float(t["value_max"]) for t in trends)
+
+    # Total = somatório(value_avg * 3600). A unidade do total depende da unidade do item.
+    total_unidade_por_seg = sum(avgs) * 3600.0
+
+    # Se o item estiver em bits/s e você quiser MB, converta:
+    total_MB = total_unidade_por_seg / 8 / 1024 / 1024  # bits/s -> bytes -> MB
+
+    print(f"[{key}] {nome}")
+    print(f"  Média: {media:.2f} (unid/s do item)")
+    print(f"  Mínimo: {minimo:.2f} | Máximo: {maximo:.2f}")
+    print(f"  Total (aprox.): {total_MB:.2f} MB\n")
