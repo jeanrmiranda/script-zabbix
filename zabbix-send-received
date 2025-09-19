@@ -16,7 +16,7 @@ HOSTNAME = "router-edge-for"
 INTERFACES = [
     {"ifIndex": 10, "label": "ptt for1 ipv6"},
     {"ifIndex": 11, "label": "transit-Durand-for1"},
-    {"ifIndex": 12, "label": "transit-EdgeUno-for"},
+    {"ifIndex": 4, "label": "transit-EdgeUno-for"},
 ]
 
 # Se True: usa últimos 30 dias; se False: mês anterior fechado
