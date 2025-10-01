@@ -13,8 +13,8 @@ AUTH_TOKEN = os.getenv("ZABBIX_TOKEN", "dcfa7ffd192f750ce9f6d6182553805936f2697b
 
 # Hosts e ifName por host (as chaves dos itens usam ifName, não ifIndex)
 HOSTS_IFINDEX = {
-    "edge1.eze1.edgeuno.net": ['ae814', 'ae33', 'ae2'],
-    "router-edge-spo": ['11', '4', '8'],
+    "edge1.eze1.edgeuno.net": ['ae814.0', 'ae33.0', 'ae2.0'],
+    "edge2.eze1.edgeuno.net": ['et-0/1/8.0', 'ae2.0'],
 }
 
 # Se True: usa últimos 30 dias; se False: mês anterior fechado
